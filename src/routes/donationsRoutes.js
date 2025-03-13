@@ -5,6 +5,6 @@ import { validate } from "../middleware/validationMiddleware.js";
 
 const router = express.Router();
 
-router.post("/", validate(donationSchema), donateToEvent);
+router.post("/donate", validate(donationSchema), donateToEvent);
 
 export default router;

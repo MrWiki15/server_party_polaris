@@ -38,17 +38,35 @@ export const donateToEvent = async (req, res, next) => {
 
     await transferTx.getReceipt(eventClient);
 
+    const { data: donation, error } = await supabase
+      .from("donations")
+      .select("*")
+      .eq("partie_id", event_id)
+      .single();
+
     // Registrar en base de datos
     await supabase
       .from("donations")
       .insert({
-        event_id,
-        donor_wallet,
-        amount_hbar,
-        tokens_minted: tokensToMint,
+        tokens_recived: data.tokens_recived + tokensToMint,
         transaction_id: transferTx.transactionId.toString(),
+        status: 2,
       })
       .eq("partie_id", event_id);
+
+    await supabase
+      .from("parties")
+      .insert({
+        donations: [...event.donations, donation.id],
+      })
+      .eq("id", event_id);
+
+    await supabase
+      .from("parties")
+      .insert({
+        collected_amount: event.collected_amount + amount_hbar,
+      })
+      .eq("id", event_id);
 
     res.json({
       success: true,
