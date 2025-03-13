@@ -23,8 +23,8 @@ app.use(
 app.use(express.json({ limit: "10kb" }));
 
 // Rutas
-app.use("/api/v1/events", eventsRoutes);
-app.use("/api/v1/donations", donationsRoutes);
+app.use("/events", eventsRoutes);
+app.use("/donations", donationsRoutes);
 
 // Manejo de errores centralizado
 app.use((err, req, res, next) => {

@@ -3,6 +3,8 @@ import {
   AccountBalanceQuery,
   TokenCreateTransaction,
   Hbar,
+  HbarUnit,
+  PrivateKey,
 } from "@hashgraph/sdk";
 import supabase from "../db/db.js";
 import { getHederaClient } from "../hedera/hederaClient.js";
@@ -13,7 +15,7 @@ const client = getHederaClient();
 
 export const createEvent = async (req, res, next) => {
   try {
-    const { event_id } = req.body;
+    const { event_id, organizer_wallet } = req.body;
 
     const { data: existingEvent } = await supabase
       .from("parties")
@@ -57,21 +59,40 @@ export const checkWalletFunding = async (req, res, next) => {
   try {
     const { event_id } = req.body;
 
-    const { data: event } = await supabase
+    // Validar entrada
+    if (!event_id) {
+      return res.status(400).json({ error: "event_id es requerido" });
+    }
+
+    // Obtener wallet del evento
+    const { data: event, error } = await supabase
       .from("parties")
       .select("parti_wallet")
       .eq("id", event_id)
       .single();
 
+    if (!event?.parti_wallet) {
+      return res.status(404).json({ error: "Wallet del evento no encontrada" });
+    }
+
+    // Consultar balance
     const balance = await new AccountBalanceQuery()
       .setAccountId(event.parti_wallet)
       .execute(client);
 
-    if (balance.hbars.compareTo(Hbar.from(20)) < 0) {
+    // Convertir a Hbar
+    const hbarBalance = Hbar.from(balance.hbars.toTinybars()); // Tinybars → Hbar
+    const requiredBalance = Hbar.from(10, HbarUnit.Hbar); // 20 HBAR
+
+    // Comparar valores numéricos
+    if (
+      hbarBalance.to(HbarUnit.Hbar).toNumber() <
+      requiredBalance.to(HbarUnit.Hbar).toNumber()
+    ) {
       return res.status(402).json({
         funded: false,
-        required: "20 ℏ",
-        current: balance.hbars.toString(),
+        required: "10 ℏ",
+        current: hbarBalance.toString(),
       });
     }
 
@@ -84,24 +105,27 @@ export const checkWalletFunding = async (req, res, next) => {
 export const createTokenForEvent = async (req, res, next) => {
   try {
     const { event_id } = req.body;
+    console.log(event_id);
 
-    const { data: event } = await supabase
+    const { data, error } = await supabase
       .from("parties")
       .select("*")
       .eq("id", event_id)
       .single();
 
+    console.log(data);
+
     const eventClient = getHederaClient().setOperator(
-      event.parti_wallet,
-      PrivateKey.fromString(decryptKey(event.parti_wallet_private_key))
+      data.parti_wallet,
+      PrivateKey.fromString(decryptKey(data.parti_wallet_private_key))
     );
 
     const tokenTx = await new TokenCreateTransaction()
-      .setTokenName(event.name)
-      .setTokenSymbol(event.symbol || "EVT")
+      .setTokenName(data.name)
+      .setTokenSymbol(data.name.slice(0, 3).toUpperCase())
       .setDecimals(2)
       .setInitialSupply(0)
-      .setTreasuryAccountId(event.parti_wallet)
+      .setTreasuryAccountId(data.parti_wallet)
       .freezeWith(eventClient)
       .execute(eventClient);
 

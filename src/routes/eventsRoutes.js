@@ -9,8 +9,8 @@ import { validate } from "../middleware/validationMiddleware.js";
 
 const router = express.Router();
 
-router.post("/", validate(eventSchema), createEvent);
-router.post("/check-funding", checkWalletFunding);
-router.post("/create-token", createTokenForEvent);
+router.post("/create", validate(eventSchema), createEvent);
+router.post("/check_wallet_founding", checkWalletFunding);
+router.post("/create_token", createTokenForEvent);
 
 export default router;
