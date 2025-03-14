@@ -4,8 +4,15 @@ import dotenv from "dotenv";
 import eventsRoutes from "./src/routes/eventsRoutes.js";
 import donationsRoutes from "./src/routes/donationsRoutes.js";
 import { validateEncryptionKey } from "./src/utils/crypto.js";
+import webPush from "web-push";
 
 dotenv.config();
+
+webPush.setVapidDetails(
+  "universe@polarisweb3.org", // Email de contacto
+  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY, // Clave pública VAPID
+  process.env.VAPID_PRIVATE_KEY // Clave privada VAPID
+);
 
 // Validar clave de encriptación al iniciar
 validateEncryptionKey();
@@ -25,6 +32,7 @@ app.use(express.json({ limit: "10kb" }));
 // Rutas
 app.use("/events", eventsRoutes);
 app.use("/donations", donationsRoutes);
+app.post("/worker", async (req, res) => await handler(req, res));
 
 // Manejo de errores centralizado
 app.use((err, req, res, next) => {
@@ -35,6 +43,21 @@ app.use((err, req, res, next) => {
     ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
   });
 });
+
+async function handler(req, res) {
+  const { subscription, title, body } = req.body;
+
+  try {
+    await webPush.sendNotification(
+      subscription,
+      JSON.stringify({ title, body })
+    );
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Error enviando notificación:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

@@ -5,6 +5,7 @@ export const eventSchema = Joi.object({
 });
 
 export const donationSchema = Joi.object({
+  donation_id: Joi.number().required(),
   event_id: Joi.string().required(),
   donor_wallet: Joi.string()
     .pattern(/^0\.0\.\d+$/)

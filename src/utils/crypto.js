@@ -56,6 +56,8 @@ export const decryptKey = (encryptedKeyBase64) => {
       decipher.final(),
     ]);
 
+    console.log("private_key descriptada");
+    console.log(decrypted.toString("utf-8"));
     return decrypted.toString("utf8");
   } catch (error) {
     throw new Error(`Error de descifrado: ${error.message}`);
