@@ -3,6 +3,9 @@ import {
   createEvent,
   checkWalletFunding,
   createTokenForEvent,
+  updateTokenForEvent,
+  windrawMoney,
+  createLiquidityPool,
 } from "../controllers/eventController.js";
 import { eventSchema } from "../validation/validationSchemas.js";
 import { validate } from "../middleware/validationMiddleware.js";
@@ -10,7 +13,11 @@ import { validate } from "../middleware/validationMiddleware.js";
 const router = express.Router();
 
 router.post("/create", validate(eventSchema), createEvent);
+router.get("/create", (req, res) => res.status(200).json({ success: true }));
 router.post("/check_wallet_founding", checkWalletFunding);
 router.post("/create_token", createTokenForEvent);
+router.post("/update_token", updateTokenForEvent);
+router.post("/create_pool", createLiquidityPool);
+router.post("/windraw", windrawMoney);
 
 export default router;

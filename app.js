@@ -9,7 +9,7 @@ import webPush from "web-push";
 dotenv.config();
 
 webPush.setVapidDetails(
-  "universe@polarisweb3.org", // Email de contacto
+  "mailto:wikicanton439@gmail.com", // Correo electrónico del propietario de la clave VAPID (debe ser válido)
   process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY, // Clave pública VAPID
   process.env.VAPID_PRIVATE_KEY // Clave privada VAPID
 );
@@ -23,7 +23,8 @@ const app = express();
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN || "*",
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PUT", "DELETE"], // Métodos HTTP permitidos
+    credentials: true, // Permitir cookies y autorizaciones
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
