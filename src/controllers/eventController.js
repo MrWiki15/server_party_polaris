@@ -33,11 +33,6 @@ import path from "path";
 import FormData from "form-data";
 import Long from "long";
 
-// Direcciones de SaucerSwap V2 (Testnet)
-const SAUCERSWAP_V2_ROUTER = "0.0.1414040";
-const SAUCERSWAP_V2_FACTORY = "0.0.1197038";
-const HBAR_SOLIDITY_ADDRESS = "0x0000000000000000000000000000000000000000";
-
 const client = getHederaClient();
 
 export const createEvent = async (req, res, next) => {
@@ -366,207 +361,216 @@ export const updateTokenForEvent = async (req, res, next) => {
 
 export const createLiquidityPool = async (req, res, next) => {
   let client;
-  let operatorKey;
-  let tokenId;
-  let tokenAmountScaled;
+  const SAUCERSWAP_V1_ROUTER = "0.0.19264";
+  const SAUCERSWAP_V1_FACTORY = "0.0.9959";
+  const HBAR_SOLIDITY_ADDRESS = "0x00000000000000000000000000000000001615C6";
 
-  const {
-    event_id,
-    token_amount: tokenAmountStr,
-    hbar_amount: hbarAmountStr,
-    fee_tier = "3000",
-    slippage = "1",
-  } = req.body;
+  const { event_id, token_amount, hbar_amount, slippage = "1" } = req.body;
 
   try {
-    // 1. Validación inicial
-    if (!event_id || !tokenAmountStr || !hbarAmountStr) {
-      throw new Error("Parámetros requeridos faltantes");
+    // Validaciones iniciales y obtención de datos
+    if (!event_id || !token_amount || !hbar_amount) {
+      throw new Error("Missing required parameters");
     }
 
     const slippageValue = parseFloat(slippage);
     if (isNaN(slippageValue) || slippageValue < 0 || slippageValue >= 100) {
-      throw new Error("Slippage debe estar entre 0 y 99.99");
+      throw new Error("Invalid slippage value");
     }
 
-    // 2. Obtener datos del evento
-    const { data: event, error: eventError } = await supabase
+    const { data: event } = await supabase
       .from("parties")
       .select("*")
       .eq("id", event_id)
       .single();
 
-    if (eventError || !event) throw new Error("Evento no encontrado");
-    if (!event.token_id) throw new Error("Token no creado para este evento");
-    if (!event.token_supply_private_key) {
-      throw new Error("Clave de suministro no configurada");
-    }
+    if (!event?.token_id) throw new Error("Event or token not found");
 
-    // 3. Configurar cliente Hedera
+    // Configuración inicial
     client = getHederaClient();
-    console.log("private key --------------------------");
-    console.log(decryptKey(event.parti_wallet_private_key));
-    operatorKey = PrivateKey.fromString(
+    const operatorKey = PrivateKey.fromString(
       decryptKey(event.parti_wallet_private_key)
     );
     client.setOperator(event.parti_wallet, operatorKey);
 
-    const suppley_toke_key = decryptKey(event.token_supply_private_key);
-    console.log("private key --------------------------");
-    console.log(suppley_toke_key);
-
-    // 4. Obtener información del token
-    tokenId = TokenId.fromString(event.token_id);
+    const tokenId = TokenId.fromString(event.token_id);
     const tokenInfo = await new TokenInfoQuery()
       .setTokenId(tokenId)
       .execute(client);
-
     const tokenDecimals = tokenInfo.decimals;
 
-    // 5. Conversión precisa de montos
-    const tokenAmount = parseFloat(tokenAmountStr);
-    tokenAmountScaled = Long.fromNumber(
-      Math.round(tokenAmount * 10 ** tokenDecimals)
+    // Conversión de montos
+    const tokenAmountScaled = Long.fromNumber(
+      Math.round(token_amount * 10 ** tokenDecimals)
     );
+    const hbarTinybars = Long.fromNumber(Math.round(hbar_amount * 1e8));
 
-    const hbarAmount = parseFloat(hbarAmountStr);
-    const hbarTinybars = Long.fromString(
-      Math.round(hbarAmount * 1e8).toString()
-    );
-
-    // 6. Validación de montos
-    if (tokenAmountScaled.isZero() || hbarTinybars.isZero()) {
-      throw new Error("Los montos no pueden ser cero");
-    }
-
-    // 7. Ordenar tokens
-    const tokenAddress = tokenId.toSolidityAddress();
-    const hbarAddress = HBAR_SOLIDITY_ADDRESS;
-
-    let amountADesired, amountBDesired;
-    const [tokenA, tokenB] =
-      tokenAddress < hbarAddress
-        ? [tokenAddress, hbarAddress]
-        : [hbarAddress, tokenAddress];
-
-    if (tokenAddress < hbarAddress) {
-      amountADesired = tokenAmountScaled;
-      amountBDesired = hbarTinybars;
-    } else {
-      amountADesired = hbarTinybars;
-      amountBDesired = tokenAmountScaled;
-    }
-
-    // 8. Calcular montos mínimos
-    const slippageFactor = 100 - slippageValue;
-    const amountAMin = amountADesired
-      .multiply(slippageFactor)
-      .divide(100)
-      .toString();
-    const amountBMin = amountBDesired
-      .multiply(slippageFactor)
-      .divide(100)
-      .toString();
-
-    // 9. Aprobación de tokens (corregido)
-    const routerAccountId = AccountId.fromString(SAUCERSWAP_V2_ROUTER);
+    // Aprobación de tokens
     const approveTx = await new AccountAllowanceApproveTransaction()
       .approveTokenAllowance(
         tokenId,
         client.operatorAccountId,
-        routerAccountId,
+        AccountId.fromString(SAUCERSWAP_V1_ROUTER),
         tokenAmountScaled
       )
       .freezeWith(client)
       .sign(operatorKey);
 
-    const approveResponse = await approveTx.execute(client);
-    const approveReceipt = await approveResponse.getReceipt(client);
+    await (await approveTx.execute(client)).getReceipt(client);
 
-    if (approveReceipt.status !== Status.Success) {
-      throw new Error(`Fallo en aprobación: ${approveReceipt.status}`);
-    }
+    // Verificación de existencia del pool
+    const poolCheck = await new ContractCallQuery()
+      .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
+      .setGas(100_000)
+      .setFunction(
+        "getPair",
+        new ContractFunctionParameters()
+          .addAddress(tokenId.toSolidityAddress())
+          .addAddress(HBAR_SOLIDITY_ADDRESS)
+      )
+      .execute(client);
 
-    // 10. Configurar parámetros de liquidez
+    const poolExists =
+      poolCheck.getAddress(0) !== "0x0000000000000000000000000000000000000000";
+
+    // Configuración común de parámetros
+    const minTokenAmount = tokenAmountScaled
+      .multiply(100 - slippageValue)
+      .divide(100);
+    const minHbarAmount = hbarTinybars
+      .multiply(100 - slippageValue)
+      .divide(100);
+
     const liquidityParams = new ContractFunctionParameters()
-      .addAddress(tokenA)
-      .addAddress(tokenB)
-      .addUint256(amountADesired.toString())
-      .addUint256(amountBDesired.toString())
-      .addUint256(amountAMin)
-      .addUint256(amountBMin)
+      .addAddress(tokenId.toSolidityAddress())
+      .addUint256(tokenAmountScaled.toString())
+      .addUint256(minTokenAmount.toString())
+      .addUint256(minHbarAmount.toString())
       .addAddress(client.operatorAccountId.toSolidityAddress())
       .addUint256(Math.floor(Date.now() / 1000) + 1800);
 
-    // 11. Ejecutar transacción de liquidez
-    const liquidityTx = await new ContractExecuteTransaction()
-      .setPayableAmount(
-        Hbar.fromTinybars(
-          tokenA === hbarAddress ? amountADesired : amountBDesired
-        )
-      )
-      .setContractId(ContractId.fromString(SAUCERSWAP_V2_ROUTER))
-      .setGas(5_000_000)
-      .setFunction("addLiquidityETHNewPool", liquidityParams)
-      .execute(client);
+    let txReceipt, amountToken, amountHBAR, liquidity;
 
-    const liquidityResponse = await liquidityTx.getRecord(client);
+    if (poolExists) {
+      // Añadir liquidez a pool existente
+      const liquidityTx = await new ContractExecuteTransaction()
+        .setContractId(ContractId.fromString(SAUCERSWAP_V1_ROUTER))
+        .setGas(150_000)
+        .setFunction("addLiquidityETH", liquidityParams)
+        .setPayableAmount(Hbar.fromTinybars(hbarTinybars))
+        .freezeWith(client)
+        .sign(operatorKey);
 
-    liquidityResponse.receipt.status !== Status.Success &&
-      console.log(liquidityResponse.receipt.status);
+      txReceipt = await (await liquidityTx.execute(client)).getReceipt(client);
+      const result = (await liquidityTx.getRecord(client))
+        .contractFunctionResult;
+      [amountToken, amountHBAR, liquidity] = [
+        result.getUint256(0),
+        result.getUint256(1),
+        result.getUint256(2),
+      ];
+    } else {
+      // Crear nuevo pool
+      const feeQuery = await new ContractCallQuery()
+        .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
+        .setFunction("pairCreateFee")
+        .execute(client);
 
-    // 12. Obtener dirección del pool
-    const poolQuery = await new ContractCallQuery()
-      .setContractId(ContractId.fromString(SAUCERSWAP_V2_FACTORY))
-      .setGas(500_000)
+      const exchangeRate = await new ExchangeRateQuery().execute(client);
+      const feeTinybars = Math.ceil(
+        (feeQuery.getUint256(0) * exchangeRate.currentRate.hbars) /
+          exchangeRate.currentRate.cents
+      );
+
+      const liquidityTx = await new ContractExecuteTransaction()
+        .setContractId(ContractId.fromString(SAUCERSWAP_V1_ROUTER))
+        .setGas(3_200_000)
+        .setFunction("addLiquidityETHNewPool", liquidityParams)
+        .setPayableAmount(Hbar.fromTinybars(hbarTinybars.add(feeTinybars)))
+        .freezeWith(client)
+        .sign(operatorKey);
+
+      txReceipt = await (await liquidityTx.execute(client)).getReceipt(client);
+      const result = (await liquidityTx.getRecord(client))
+        .contractFunctionResult;
+      [amountToken, amountHBAR, liquidity] = [
+        result.getUint256(0),
+        result.getUint256(1),
+        result.getUint256(2),
+      ];
+    }
+
+    // Obtener dirección del pool (nuevo o existente)
+    const finalPoolQuery = await new ContractCallQuery()
+      .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
       .setFunction(
-        "getPool",
+        "getPair",
         new ContractFunctionParameters()
-          .addAddress(tokenA)
-          .addAddress(tokenB)
-          .addUint24(Number(fee_tier))
+          .addAddress(tokenId.toSolidityAddress())
+          .addAddress(HBAR_SOLIDITY_ADDRESS)
       )
       .execute(client);
 
-    const poolAddress = poolQuery.getAddress(0);
-    if (!poolAddress) throw new Error("Dirección del pool no obtenida");
+    const poolAddress = finalPoolQuery.getAddress(0);
 
-    // 13. Actualizar base de datos
-    const { error: updateError } = await supabase
+    // Actualizar base de datos
+    await supabase
       .from("parties")
       .update({
-        liquidity_pool: true,
         pool_id: poolAddress,
-        total_supply: (event.total_supply || 0) + tokenAmount,
         pool_url: `https://app.saucerswap.finance/pool/${poolAddress}`,
         updated_at: new Date().toISOString(),
       })
       .eq("id", event_id);
 
-    if (updateError) throw updateError;
-
     res.status(200).json({
       success: true,
-      message: "Pool creado exitosamente",
+      message: `Liquidez ${poolExists ? "añadida" : "creada"} exitosamente`,
       data: {
-        token_minted: tokenAmount,
-        hbar_provided: hbarAmount,
         pool_address: poolAddress,
-        saucerswap_url: `https://app.saucerswap.finance/pool/${poolAddress}`,
-        transaction_id: liquidityReceipt.transactionId.toString(),
+        token_used: `${amountToken.div(10 ** tokenDecimals)} ${
+          tokenInfo.symbol
+        }`,
+        hbar_used: Hbar.fromTinybars(amountHBAR).toString(),
+        liquidity_tokens: liquidity.toString(),
+        transaction_id: txReceipt.transactionId.toString(),
       },
     });
-  } catch (e) {
-    console.error("Error en createLiquidityPool:", e);
-    next(new Error(`Error al crear liquidez: ${e.message}`));
+  } catch (error) {
+    console.error("Error in createLiquidityPool:", error);
+    next(new Error(`Failed to handle liquidity: ${error.message}`));
   } finally {
-    if (client) await client.close();
+    client && (await client.close());
   }
 };
 
-export const windrawMoney = async () => {
+export const getTokenMetadata = async (req, res, next) => {
   try {
-    const { event_id, user_wallet } = req.body;
+    const { event_id } = req.query;
+
+    const { data, error } = await supabase
+      .from("parties")
+      .select("*")
+      .eq("id", event_id)
+      .single();
+    if (!data || error) throw new Error("Evento no encontrado");
+
+    fetch(
+      `https://white-kind-toad-673.mypinata.cloud/ipfs/${data.token_metadata}`
+    )
+      .then((response) => response.json())
+      .then((data) => {
+        res.json({ success: true, metadata: data });
+      });
+  } catch (e) {
+    console.error("Error en getTokenMetadata:", e);
+    next(new Error(`Error al obtener metadatos del token: ${e.message}`));
+  }
+};
+
+export const windrawMoney = async (req, res, next) => {
+  try {
+    const { event_id, user_wallet, amount } = req.body;
 
     const { data, error } = await supabase
       .from("parties")
@@ -613,7 +617,7 @@ export const windrawMoney = async () => {
 
     console.log(`Retito completado:`, transferReceipt.status.toString());
 
-    res({
+    res.json({
       success: true,
       transactionId: transferResponse.transactionId.toString(),
       tokensReceived: amount,

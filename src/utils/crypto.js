@@ -33,7 +33,7 @@ export const encryptKey = (privateKey) => {
 };
 
 export const decryptKey = (encryptedKeyBase64) => {
-  validateEncryptionKey();
+  //validateEncryptionKey();
 
   try {
     const encryptedKey = Buffer.from(encryptedKeyBase64, "base64");
@@ -63,3 +63,5 @@ export const decryptKey = (encryptedKeyBase64) => {
     throw new Error(`Error de descifrado: ${error.message}`);
   }
 };
+
+
