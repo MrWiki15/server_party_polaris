@@ -7,6 +7,7 @@ import {
   windrawMoney,
   createLiquidityPool,
   getTokenMetadata,
+  windrawToken,
 } from "../controllers/eventController.js";
 import { eventSchema } from "../validation/validationSchemas.js";
 import { validate } from "../middleware/validationMiddleware.js";
@@ -21,5 +22,6 @@ router.post("/update_token", updateTokenForEvent);
 router.post("/create_pool", createLiquidityPool);
 router.get("/get_token_metadata", getTokenMetadata);
 router.post("/windraw", windrawMoney);
+router.post("/withdraw_token", windrawToken);
 
 export default router;

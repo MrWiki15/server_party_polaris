@@ -10,6 +10,7 @@ import {
   Transaction,
   TransferTransaction,
   TokenId,
+  AccountUpdateTransaction,
   Status,
   AccountId,
   ContractExecuteTransaction,
@@ -361,23 +362,26 @@ export const updateTokenForEvent = async (req, res, next) => {
 
 export const createLiquidityPool = async (req, res, next) => {
   let client;
+  // Constantes de la aplicación
   const SAUCERSWAP_V1_ROUTER = "0.0.19264";
   const SAUCERSWAP_V1_FACTORY = "0.0.9959";
-  const HBAR_SOLIDITY_ADDRESS = "0x00000000000000000000000000000000001615C6";
+  const WHBAR_TOKEN_ID = "0.0.15057"; // Testnet WHBAR
+  const WHBAR_SOLIDITY_ADDRESS =
+    TokenId.fromString(WHBAR_TOKEN_ID).toSolidityAddress();
+  const ZERO_ADDRESS = "0000000000000000000000000000000000000000";
 
+  // Extraer y validar parámetros de entrada
   const { event_id, token_amount, hbar_amount, slippage = "1" } = req.body;
-
   try {
-    // Validaciones iniciales y obtención de datos
     if (!event_id || !token_amount || !hbar_amount) {
       throw new Error("Missing required parameters");
     }
-
     const slippageValue = parseFloat(slippage);
     if (isNaN(slippageValue) || slippageValue < 0 || slippageValue >= 100) {
       throw new Error("Invalid slippage value");
     }
 
+    // Obtenemos el evento (y por ende la información del token) desde la DB
     const { data: event } = await supabase
       .from("parties")
       .select("*")
@@ -386,26 +390,26 @@ export const createLiquidityPool = async (req, res, next) => {
 
     if (!event?.token_id) throw new Error("Event or token not found");
 
-    // Configuración inicial
+    // Configuración del cliente Hedera y asignación del operador
     client = getHederaClient();
     const operatorKey = PrivateKey.fromString(
       decryptKey(event.parti_wallet_private_key)
     );
     client.setOperator(event.parti_wallet, operatorKey);
 
+    // Convertir montos: se consulta la información del token para obtener los decimales
     const tokenId = TokenId.fromString(event.token_id);
     const tokenInfo = await new TokenInfoQuery()
       .setTokenId(tokenId)
       .execute(client);
     const tokenDecimals = tokenInfo.decimals;
 
-    // Conversión de montos
     const tokenAmountScaled = Long.fromNumber(
       Math.round(token_amount * 10 ** tokenDecimals)
     );
-    const hbarTinybars = Long.fromNumber(Math.round(hbar_amount * 1e8));
+    const hbarTinybars = Long.fromNumber(Math.round(hbar_amount * 1e8)); // 1 HBAR = 1e8 tinybars
 
-    // Aprobación de tokens
+    // Aprobación de allowance: se autoriza al router a gastar tokens en nombre del operador
     const approveTx = await new AccountAllowanceApproveTransaction()
       .approveTokenAllowance(
         tokenId,
@@ -415,25 +419,23 @@ export const createLiquidityPool = async (req, res, next) => {
       )
       .freezeWith(client)
       .sign(operatorKey);
-
     await (await approveTx.execute(client)).getReceipt(client);
 
-    // Verificación de existencia del pool
-    const poolCheck = await new ContractCallQuery()
+    // Verificar si existe ya el pool utilizando el factory
+    const poolCheckQuery = new ContractCallQuery()
       .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
-      .setGas(100_000)
+      .setGas(5_000_000)
       .setFunction(
         "getPair",
         new ContractFunctionParameters()
           .addAddress(tokenId.toSolidityAddress())
-          .addAddress(HBAR_SOLIDITY_ADDRESS)
-      )
-      .execute(client);
+          .addAddress(WHBAR_SOLIDITY_ADDRESS) // Usar WHBAR aquí
+      );
+    const poolCheckResponse = await poolCheckQuery.execute(client);
+    const poolExists = poolCheckResponse.getAddress(0) !== ZERO_ADDRESS;
+    let poolAddress = poolCheckResponse.getAddress(0);
 
-    const poolExists =
-      poolCheck.getAddress(0) !== "0x0000000000000000000000000000000000000000";
-
-    // Configuración común de parámetros
+    // Calcular montos mínimos aplicando slippage
     const minTokenAmount = tokenAmountScaled
       .multiply(100 - slippageValue)
       .divide(100);
@@ -441,58 +443,106 @@ export const createLiquidityPool = async (req, res, next) => {
       .multiply(100 - slippageValue)
       .divide(100);
 
+    // Construir parámetros para la función de liquidez
+    const currentTimestamp = Math.floor(Date.now() / 1000);
     const liquidityParams = new ContractFunctionParameters()
       .addAddress(tokenId.toSolidityAddress())
       .addUint256(tokenAmountScaled.toString())
       .addUint256(minTokenAmount.toString())
       .addUint256(minHbarAmount.toString())
       .addAddress(client.operatorAccountId.toSolidityAddress())
-      .addUint256(Math.floor(Date.now() / 1000) + 1800);
+      .addUint256(currentTimestamp + 1800); // Deadline: +30 minutos
 
+    // Declaración de variables para almacenar resultados comunes
     let txReceipt, amountToken, amountHBAR, liquidity;
 
     if (poolExists) {
-      // Añadir liquidez a pool existente
-      const liquidityTx = await new ContractExecuteTransaction()
-        .setContractId(ContractId.fromString(SAUCERSWAP_V1_ROUTER))
-        .setGas(150_000)
-        .setFunction("addLiquidityETH", liquidityParams)
-        .setPayableAmount(Hbar.fromTinybars(hbarTinybars))
-        .freezeWith(client)
-        .sign(operatorKey);
+      // 1. Asociar el token LP a la cuenta del operador
+      const lpTokenId = TokenId.fromSolidityAddress(poolAddress);
 
-      txReceipt = await (await liquidityTx.execute(client)).getReceipt(client);
-      const result = (await liquidityTx.getRecord(client))
-        .contractFunctionResult;
+      // Verificar si la cuenta está asociada al token LP
+      const accountInfo = await new AccountInfoQuery()
+        .setAccountId(client.operatorAccountId)
+        .execute(client);
+
+      const tokenRelationships = Array.from(
+        accountInfo.tokenRelationships.values()
+      );
+      const isAssociated = tokenRelationships.some(
+        (tr) => tr.tokenId.toString() === lpTokenId.toString()
+      );
+
+      if (!isAssociated) {
+        const accountUpdateTx = new AccountUpdateTransaction()
+          .setAccountId(client.operatorAccountId)
+          .setMaxAutomaticTokenAssociations(
+            accountInfo.maxAutomaticTokenAssociations + 1
+          );
+
+        await (await accountUpdateTx.execute(client)).getReceipt(client);
+
+        const associateTx = await new TokenAssociateTransaction()
+          .setAccountId(client.operatorAccountId)
+          .setTokenIds([lpTokenId])
+          .freezeWith(client)
+          .sign(operatorKey);
+
+        await (await associateTx.execute(client)).getReceipt(client);
+      }
+
+      // 2. Asegurar firma explícita en la transacción
+      const liquidityTx = await new ContractExecuteTransaction()
+        .setPayableAmount(Hbar.fromTinybars(hbarTinybars))
+        .setContractId(ContractId.fromString(SAUCERSWAP_V1_ROUTER))
+        .setGas(5_000_000)
+        .setFunction("addLiquidityETH", liquidityParams)
+        .freezeWith(client) // Congela la transacción
+        .sign(operatorKey); // Firma explícita
+
+      txReceipt = await liquidityTx.execute(client);
+      const record = await liquidityTx.getRecord(client);
+      const result = record.contractFunctionResult;
       [amountToken, amountHBAR, liquidity] = [
         result.getUint256(0),
         result.getUint256(1),
         result.getUint256(2),
       ];
     } else {
-      // Crear nuevo pool
+      // Si no existe: calcular fee de creación del pool y llamar a la función addLiquidityETHNewPool
       const feeQuery = await new ContractCallQuery()
         .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
+        .setGas(5_000_000)
         .setFunction("pairCreateFee")
         .execute(client);
 
-      const exchangeRate = await new ExchangeRateQuery().execute(client);
-      const feeTinybars = Math.ceil(
-        (feeQuery.getUint256(0) * exchangeRate.currentRate.hbars) /
-          exchangeRate.currentRate.cents
+      const whbarHelperContract = "0.0.5286055"; // Testnet WhbarHelper
+      const convertFeeTx = new ContractCallQuery()
+        .setContractId(ContractId.fromString(whbarHelperContract))
+        .setGas(5_000_000)
+        .setFunction(
+          "tinycentsToTinybars",
+          new ContractFunctionParameters().addUint256(feeQuery.getUint256(0))
+        );
+
+      const convertedFee = await convertFeeTx.execute(client);
+      const feeTinybars = convertedFee.getUint256(0);
+
+      // Sumar el fee al monto de hbar para enviar en la transacción
+      const totalPayable = hbarTinybars.add(
+        Long.fromString(feeTinybars.toString())
       );
 
       const liquidityTx = await new ContractExecuteTransaction()
         .setContractId(ContractId.fromString(SAUCERSWAP_V1_ROUTER))
-        .setGas(3_200_000)
+        .setGas(5_000_000)
         .setFunction("addLiquidityETHNewPool", liquidityParams)
-        .setPayableAmount(Hbar.fromTinybars(hbarTinybars.add(feeTinybars)))
+        .setPayableAmount(Hbar.fromTinybars(totalPayable)) // Fee + HBAR liquidity
         .freezeWith(client)
         .sign(operatorKey);
 
       txReceipt = await (await liquidityTx.execute(client)).getReceipt(client);
-      const result = (await liquidityTx.getRecord(client))
-        .contractFunctionResult;
+      const record = await liquidityTx.getRecord(client);
+      const result = record.contractFunctionResult;
       [amountToken, amountHBAR, liquidity] = [
         result.getUint256(0),
         result.getUint256(1),
@@ -500,20 +550,20 @@ export const createLiquidityPool = async (req, res, next) => {
       ];
     }
 
-    // Obtener dirección del pool (nuevo o existente)
-    const finalPoolQuery = await new ContractCallQuery()
+    // Consulta final: obtener la dirección del pool de liquidez
+    const finalPoolQuery = new ContractCallQuery()
       .setContractId(ContractId.fromString(SAUCERSWAP_V1_FACTORY))
+      .setGas(5_000_000)
       .setFunction(
         "getPair",
         new ContractFunctionParameters()
           .addAddress(tokenId.toSolidityAddress())
-          .addAddress(HBAR_SOLIDITY_ADDRESS)
-      )
-      .execute(client);
+          .addAddress(WHBAR_SOLIDITY_ADDRESS) // Usar WHBAR aquí
+      );
+    const finalPoolResponse = await finalPoolQuery.execute(client);
+    poolAddress = finalPoolResponse.getAddress(0);
 
-    const poolAddress = finalPoolQuery.getAddress(0);
-
-    // Actualizar base de datos
+    // Actualizar la base de datos (asegúrate de que Supabase esté correctamente configurado)
     await supabase
       .from("parties")
       .update({
@@ -533,14 +583,14 @@ export const createLiquidityPool = async (req, res, next) => {
         }`,
         hbar_used: Hbar.fromTinybars(amountHBAR).toString(),
         liquidity_tokens: liquidity.toString(),
-        transaction_id: txReceipt.transactionId.toString(),
+        transaction_id: txReceipt ? txReceipt.transactionId.toString() : null,
       },
     });
   } catch (error) {
     console.error("Error in createLiquidityPool:", error);
     next(new Error(`Failed to handle liquidity: ${error.message}`));
   } finally {
-    client && (await client.close());
+    if (client) await client.close();
   }
 };
 
@@ -588,7 +638,7 @@ export const windrawMoney = async (req, res, next) => {
       );
 
     //crear memo
-    const memo = `windraw money from sonnar app -> https://sonnar.club -> ${new Date().toISOString()}`;
+    const memo = `windraw hbar from sonnar app -> https://sonnar.club -> ${new Date().toISOString()}`;
 
     // Configurar cliente
     const operatorKey = PrivateKey.fromString(
@@ -626,6 +676,70 @@ export const windrawMoney = async (req, res, next) => {
     console.error("Error en windrawMoney: ", e);
     next(
       new Error(`Error retirar dinero de la wallet del parti: ${e.message}`)
+    );
+  }
+};
+
+export const windrawToken = async (req, res, next) => {
+  try {
+    const { event_id, user_wallet, amount } = req.body;
+
+    const { data, error } = await supabase
+      .from("parties")
+      .select("*")
+      .eq("id", event_id)
+      .single();
+    if (!data || error) throw new Error("Evento no encontrado");
+    if (!data.parti_wallet)
+      throw new Error(
+        "Wallet del evento no encontrada, complete el setup para continuar"
+      );
+    if (!data.parti_wallet_private_key)
+      throw new Error(
+        "Token no tiene el setup completado, complete el setup para poder retirar dinero"
+      );
+
+    //crear memo
+    const memo = `windraw token from sonnar app -> https://sonnar.club -> ${new Date().toISOString()}`;
+
+    // Configurar cliente
+    const operatorKey = PrivateKey.fromString(
+      decryptKey(data.parti_wallet_private_key)
+    );
+
+    const client = getHederaClient().setOperator(
+      data.parti_wallet,
+      operatorKey
+    );
+
+    const transaction = await new TransferTransaction()
+      .addTokenTransfer(
+        TokenId.fromString(data.token_id),
+        AccountId.fromString(data.parti_wallet),
+        Number(-amount * 100)
+      )
+      .addTokenTransfer(
+        TokenId.fromString(data.token_id),
+        AccountId.fromString(user_wallet),
+        Number(amount * 100)
+      )
+      .setTransactionMemo(memo)
+      .freezeWith(client);
+
+    const transferResponse = await transaction.execute(client);
+    const transferReceipt = await transferResponse.getReceipt(client);
+
+    console.log(`Retito completado:`, transferReceipt.status.toString());
+
+    res.json({
+      success: true,
+      transactionId: transferResponse.transactionId.toString(),
+      tokensReceived: amount,
+    });
+  } catch (e) {
+    console.error("Error en windrawToken: ", e);
+    next(
+      new Error(`Error retirar un token de la wallet del parti: ${e.message}`)
     );
   }
 };
